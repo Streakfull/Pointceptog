@@ -11,6 +11,7 @@ import weakref
 import torch
 import torch.nn as nn
 import torch.utils.data
+from packaging import version
 from functools import partial
 
 if sys.version_info >= (3, 10):
@@ -18,6 +19,7 @@ if sys.version_info >= (3, 10):
 else:
     from collections import Iterator
 from tensorboardX import SummaryWriter
+import copy
 
 from .defaults import create_ddp_model, worker_init_fn
 from .hooks import HookBase, build_hooks
@@ -29,14 +31,20 @@ from pointcept.utils.optimizer import build_optimizer
 from pointcept.utils.scheduler import build_scheduler
 from pointcept.utils.events import EventStorage, ExceptionWriter
 from pointcept.utils.registry import Registry
+from pointcept.engines.utils.wandb import Wandb
 
 
 TRAINERS = Registry("trainers")
+AMP_DTYPE = dict(
+    float16=torch.float16,
+    bfloat16=torch.bfloat16,
+)
 
 
 class TrainerBase:
     def __init__(self) -> None:
         self.hooks = []
+        self.model = None
         self.epoch = 0
         self.start_epoch = 0
         self.max_epoch = 0
@@ -117,6 +125,7 @@ class TrainerBase:
 class Trainer(TrainerBase):
     def __init__(self, cfg):
         super(Trainer, self).__init__()
+        wandb_cfg = copy.deepcopy(cfg)
         self.epoch = 0
         self.start_epoch = 0
         self.max_epoch = cfg.eval_epoch
@@ -143,6 +152,29 @@ class Trainer(TrainerBase):
         self.scaler = self.build_scaler()
         self.logger.info("=> Building hooks ...")
         self.register_hooks(self.cfg.hooks)
+        self.init_wandb(cfg, wandb_cfg)
+        self.global_step = 0
+
+    def init_wandb(self, cfg, wandb_cfg):
+        wandb_project_name = cfg.get("wandb_project_name", "pointcept")
+        wandb_tags = cfg.get("wandb_tags", [])
+        self.enable_wandb = cfg.get("enable_wandb", False)
+        self.use_step_logging = cfg.get("use_step_logging", False)
+        self.log_every = cfg.get(
+            "log_every", 500
+        )  # Default log every 500 steps if enabled
+
+        self.wandb = Wandb(
+            self.enable_wandb,
+            wandb_project_name,
+            self.logger,
+            tags=wandb_tags,
+            cfg=wandb_cfg,
+            use_step_logging=self.use_step_logging,
+            print_every=self.log_every,
+        )
+
+        self.wandb.init()
 
     def train(self):
         with EventStorage() as self.storage, ExceptionWriter():
@@ -151,9 +183,9 @@ class Trainer(TrainerBase):
             self.logger.info(">>>>>>>>>>>>>>>> Start Training >>>>>>>>>>>>>>>>")
             for self.epoch in range(self.start_epoch, self.max_epoch):
                 # => before epoch
-                # TODO: optimize to iteration based
                 if comm.get_world_size() > 1:
                     self.train_loader.sampler.set_epoch(self.epoch)
+                self.wandb.set_epoch(self.epoch)
                 self.model.train()
                 self.data_iterator = enumerate(self.train_loader)
                 self.before_epoch()
@@ -168,17 +200,28 @@ class Trainer(TrainerBase):
                     self.run_step()
                     # => after_step
                     self.after_step()
+                    self.global_step += 1
+                    self.wandb.set_global_step(self.global_step)
                 # => after epoch
                 self.after_epoch()
             # => after train
             self.after_train()
 
     def run_step(self):
+        if version.parse(torch.__version__) >= version.parse("2.4"):
+            auto_cast = partial(torch.amp.autocast, device_type="cuda")
+        else:
+            # deprecated warning
+            auto_cast = torch.cuda.amp.autocast
+
         input_dict = self.comm_info["input_dict"]
         for key in input_dict.keys():
             if isinstance(input_dict[key], torch.Tensor):
                 input_dict[key] = input_dict[key].cuda(non_blocking=True)
-        with torch.cuda.amp.autocast(enabled=self.cfg.enable_amp):
+
+        with auto_cast(
+            enabled=self.cfg.enable_amp, dtype=AMP_DTYPE[self.cfg.amp_dtype]
+        ):
             output_dict = self.model(input_dict)
             loss = output_dict["loss"]
         self.optimizer.zero_grad()
@@ -208,6 +251,7 @@ class Trainer(TrainerBase):
         if self.cfg.empty_cache:
             torch.cuda.empty_cache()
         self.comm_info["model_output_dict"] = output_dict
+        self.comm_info["model_input_dict"] = input_dict
 
     def after_epoch(self):
         for h in self.hooks:
@@ -263,7 +307,7 @@ class Trainer(TrainerBase):
             collate_fn=partial(point_collate_fn, mix_prob=self.cfg.mix_prob),
             pin_memory=True,
             worker_init_fn=init_fn,
-            drop_last=True,
+            drop_last=len(train_data) > self.cfg.batch_size,
             persistent_workers=True,
         )
         return train_loader
@@ -297,7 +341,12 @@ class Trainer(TrainerBase):
         return build_scheduler(self.cfg.scheduler, self.optimizer)
 
     def build_scaler(self):
-        scaler = torch.cuda.amp.GradScaler() if self.cfg.enable_amp else None
+        if version.parse(torch.__version__) >= version.parse("2.4"):
+            grad_scaler = partial(torch.amp.GradScaler, device="cuda")
+        else:
+            # deprecated warning
+            grad_scaler = torch.cuda.amp.GradScaler
+        scaler = grad_scaler() if self.cfg.enable_amp else None
         return scaler
 
 

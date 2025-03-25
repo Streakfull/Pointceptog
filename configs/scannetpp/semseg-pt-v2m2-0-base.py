@@ -9,6 +9,12 @@ num_worker = 24
 mix_prob = 0.8
 empty_cache = False
 enable_amp = True
+# logging settings
+enable_wandb = True
+wandb_project_name = "pointcept"
+wandb_tags = ["PTv2"]
+use_step_logging = True
+log_every = 500
 
 # model settings
 model = dict(
@@ -38,10 +44,7 @@ model = dict(
         enable_checkpoint=False,
         unpool_backend="map",  # map / interp
     ),
-    criteria=[
-        dict(type="CrossEntropyLoss", loss_weight=1.0, ignore_index=-1),
-        dict(type="LovaszLoss", mode="multiclass", loss_weight=1.0, ignore_index=-1),
-    ],
+    criteria=[dict(type="CrossEntropyLoss", loss_weight=1.0, ignore_index=-1)],
 )
 
 # scheduler settings
@@ -143,7 +146,6 @@ data = dict(
                 grid_size=0.01,
                 hash_type="fnv",
                 mode="train",
-                keys=("coord", "color", "normal", "segment"),
                 return_inverse=True,
             ),
         ],
@@ -154,7 +156,6 @@ data = dict(
                 grid_size=0.02,
                 hash_type="fnv",
                 mode="test",
-                keys=("coord", "color", "normal"),
                 return_grid_coord=True,
             ),
             crop=None,

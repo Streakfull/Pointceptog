@@ -9,6 +9,12 @@ num_worker = 24
 mix_prob = 0.8
 empty_cache = False
 enable_amp = True
+# logging settings
+enable_wandb = True
+wandb_project_name = "pointcept"
+wandb_tags = ["PTv3"]
+use_step_logging = True
+log_every = 500
 
 # model settings
 model = dict(
@@ -154,7 +160,6 @@ data = dict(
                 grid_size=0.01,
                 hash_type="fnv",
                 mode="train",
-                keys=("coord", "color", "normal", "segment"),
                 return_inverse=True,
             ),
         ],
@@ -165,7 +170,6 @@ data = dict(
                 grid_size=0.02,
                 hash_type="fnv",
                 mode="test",
-                keys=("coord", "color", "normal"),
                 return_grid_coord=True,
             ),
             crop=None,

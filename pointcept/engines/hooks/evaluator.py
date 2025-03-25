@@ -104,12 +104,17 @@ class ClsEvaluator(HookBase):
 
 @HOOKS.register_module()
 class SemSegEvaluator(HookBase):
+    def __init__(self, write_cls_iou=False):
+        self.write_cls_iou = write_cls_iou
+
     def after_epoch(self):
         if self.trainer.cfg.evaluate:
             self.eval()
 
     def eval(self):
-        self.trainer.logger.info(">>>>>>>>>>>>>>>> Start Evaluation >>>>>>>>>>>>>>>>")
+        self.trainer.logger.info(
+            ">>>>>>>>>>>>>>>> Start Evaluation Val >>>>>>>>>>>>>>>>"
+        )
         self.trainer.model.eval()
         for i, input_dict in enumerate(self.trainer.val_loader):
             for key in input_dict.keys():
@@ -191,6 +196,23 @@ class SemSegEvaluator(HookBase):
             self.trainer.writer.add_scalar("val/mIoU", m_iou, current_epoch)
             self.trainer.writer.add_scalar("val/mAcc", m_acc, current_epoch)
             self.trainer.writer.add_scalar("val/allAcc", all_acc, current_epoch)
+            self.trainer.wandb.log(
+                {"val/loss": loss_avg, "val/mIoU": m_iou, "val/mAcc": m_acc}
+            )
+            if self.write_cls_iou:
+                for i in range(self.trainer.cfg.data.num_classes):
+                    self.trainer.writer.add_scalar(
+                        f"val/cls_{i}-{self.trainer.cfg.data.names[i]} IoU",
+                        iou_class[i],
+                        current_epoch,
+                    )
+                    self.trainer.wandb.log(
+                        {
+                            f"val/cls_{i}-{self.trainer.cfg.data.names[i]} IoU": iou_class[
+                                i
+                            ]
+                        }
+                    )
         self.trainer.logger.info("<<<<<<<<<<<<<<<<< End Evaluation <<<<<<<<<<<<<<<<<")
         self.trainer.comm_info["current_metric_value"] = m_iou  # save for saver
         self.trainer.comm_info["current_metric_name"] = "mIoU"  # save for saver
